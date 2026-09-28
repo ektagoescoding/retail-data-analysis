@@ -1,7 +1,10 @@
 import streamlit as st
 import polars as pl
-
+import pandas as pd
 from file_loader import load_file
+from cleaned_dataset_preview import get_cleaned_preview, clean_dataset_pandas
+from descriptive_stats import numerical_descriptive_stats 
+from data_visualization import show_visualizations
 
 
 # --------------------------------------------------
@@ -109,7 +112,38 @@ if uploaded_file:
     try:
 
         # Load file
-        df = load_file(uploaded_file)
+        try:
+            df = load_file(uploaded_file)
+        except Exception:
+            # silent fallbacks: try pandas (all columns as strings), then relaxed polars
+            try:
+                uploaded_file.seek(0)
+                name = getattr(uploaded_file, "name", "") or ""
+                if name.lower().endswith((".csv", ".txt")):
+                    pd_df = pd.read_csv(uploaded_file, dtype=str, low_memory=False)
+                elif name.lower().endswith((".xls", ".xlsx")):
+                    uploaded_file.seek(0)
+                    pd_df = pd.read_excel(uploaded_file, dtype=str)
+                elif name.lower().endswith(".json"):
+                    uploaded_file.seek(0)
+                    pd_df = pd.read_json(uploaded_file)
+                else:
+                    uploaded_file.seek(0)
+                    pd_df = pd.read_csv(uploaded_file, dtype=str, low_memory=False)
+
+                df = pl.DataFrame(pd_df)
+            except Exception:
+                try:
+                    uploaded_file.seek(0)
+                    df = pl.read_csv(
+                        uploaded_file,
+                        infer_schema_length=10000,
+                        ignore_errors=True
+                    )
+                except Exception as final_exc:
+                    st.error("Failed to load file.")
+                    raise final_exc
+
 
         # Ensure Polars DataFrame
         if not isinstance(df, pl.DataFrame):
@@ -344,19 +378,139 @@ if uploaded_file:
         st.write("### Complete Dataset")
 
         try:
+            raw_df = df.to_pandas()
 
-            pdf = df.to_pandas()
+            # allow styling for very large dataframe
+            pd.set_option("styler.render.max_elements", max(1, raw_df.shape[0] * raw_df.shape[1]))
 
-            st.dataframe(
-                pdf,
-                height=800
-            )
+            def highlight_missing_cells(df):
+                def style_cell(value):
+                    # missing values
+                    if pd.isna(value):
+                        return "background-color: #f8d7da; color: #842029; font-weight: 600;"
+
+                    # blank strings / spaces only
+                    if isinstance(value, str):
+                        if value.strip() == "":
+                            return "background-color: #f8d7da; color: #842029; font-weight: 600;"
+
+                    return ""
+
+                return df.style.map(style_cell)
+
+            st.dataframe(highlight_missing_cells(raw_df), use_container_width=True, height=800)
 
         except Exception:
+            st.table(df.to_dicts())
 
-            st.table(
-                df.to_dicts()
+        # --------------------------------------------------
+        # CLEANED DATASET PREVIEW + COLUMN INFO
+        # --------------------------------------------------
+        try:
+            # create full cleaned dataset (use this for stats) and a preview for display
+            cleaned_full = clean_dataset_pandas(raw_df)
+            cleaned_preview = cleaned_full.head(200)
+
+            st.write("### Column information (cleaned preview)")
+            cols_info = pd.DataFrame({
+                "column": cleaned_preview.columns,
+                "dtype": cleaned_preview.dtypes.astype(str).values
+            })
+            st.dataframe(cols_info, use_container_width=True)
+
+            st.write("### Cleaned Dataset Preview")
+            st.dataframe(cleaned_preview, use_container_width=True, height=400)
+
+            # --------------------------------------------------
+            # DESCRIPTIVE STATISTICS
+            # --------------------------------------------------
+
+            st.write("### Descriptive Statistics")
+
+            # Use the cleaned dataset for statistics
+            numeric_data = cleaned_full.select_dtypes(include="number")
+
+            if not numeric_data.empty:
+                st.write("#### Numerical Descriptive Statistics")
+
+                descriptive_stats = numeric_data.describe().T
+
+                # Add useful statistics
+                descriptive_stats["median"] = numeric_data.median()
+                descriptive_stats["missing"] = numeric_data.isna().sum()
+                descriptive_stats["missing_%"] = (
+                    numeric_data.isna().mean() * 100
+                ).round(2)
+
+                # Arrange columns in a readable order
+                descriptive_stats = descriptive_stats[
+                    [
+                        "count",
+                        "mean",
+                        "median",
+                        "std",
+                        "min",
+                        "25%",
+                        "50%",
+                        "75%",
+                        "max",
+                        "missing",
+                        "missing_%"
+                    ]
+                ]
+
+                st.dataframe(
+                    descriptive_stats.round(2),
+                    use_container_width=True
+                )
+            # Categorical column statistics
+            categorical_data = cleaned_full.select_dtypes(
+                exclude="number"
             )
+
+            if not categorical_data.empty:
+                #st.write("#### Descriptive Statistics")
+
+                categorical_stats = pd.DataFrame({
+                    "column": categorical_data.columns,
+                    "count": [
+                        categorical_data[col].count()
+                        for col in categorical_data.columns
+                    ],
+                    "unique": [
+                        categorical_data[col].nunique(dropna=True)
+                        for col in categorical_data.columns
+                    ],
+                    "missing": [
+                        categorical_data[col].isna().sum()
+                        for col in categorical_data.columns
+                    ],
+                    "most_frequent": [
+                        categorical_data[col].mode().iloc[0]
+                        if not categorical_data[col].mode().empty
+                        else "N/A"
+                        for col in categorical_data.columns
+                    ]
+                })
+
+                categorical_stats["missing_%"] = (
+                    categorical_stats["missing"] / len(cleaned_full) * 100
+                ).round(2)
+
+                st.dataframe(
+                    categorical_stats,
+                    use_container_width=True
+                )
+
+            # --------------------------------------------------
+            # DATA VISUALIZATION
+            # --------------------------------------------------
+
+            show_visualizations(cleaned_full)
+
+        except Exception:
+            # silently skip if cleaning fails
+            pass
 
 
     # --------------------------------------------------
