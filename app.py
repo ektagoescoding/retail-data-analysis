@@ -5,6 +5,10 @@ from file_loader import load_file
 from cleaned_dataset_preview import get_cleaned_preview, clean_dataset_pandas
 from descriptive_stats import numerical_descriptive_stats 
 from data_visualization import show_visualizations
+from html_report import download_html_report
+import os
+from pathlib import Path
+from html_report import download_html_report
 
 
 # --------------------------------------------------
@@ -403,6 +407,47 @@ if uploaded_file:
         except Exception:
             st.table(df.to_dicts())
 
+        # ==================================================
+        # MISSING VALUE DETAILS
+        # ==================================================
+
+        st.write("## Missing Value Details")
+
+        missing_details = []
+
+        for index, row in raw_df.iterrows():
+
+            for column in raw_df.columns:
+
+                value = row[column]
+
+                if pd.isna(value) or (
+                    isinstance(value, str) and value.strip() == ""
+                ):
+
+                    column_name = str(column).replace("_", " ").strip()
+
+                    missing_details.append({
+                        "Row": index ,
+                        "Column": column,
+                        "Missing Information": column_name,
+                        "Actual Value": value
+                    })
+
+        missing_df = pd.DataFrame(missing_details)
+
+        if not missing_df.empty:
+
+            st.dataframe(
+                missing_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        else:
+
+            st.success("No missing values found.")
+                    
         # --------------------------------------------------
         # CLEANED DATASET PREVIEW + COLUMN INFO
         # --------------------------------------------------
@@ -411,7 +456,7 @@ if uploaded_file:
             cleaned_full = clean_dataset_pandas(raw_df)
             cleaned_preview = cleaned_full.head(200)
 
-            st.write("### Column information (cleaned preview)")
+            st.write("### Column information")
             cols_info = pd.DataFrame({
                 "column": cleaned_preview.columns,
                 "dtype": cleaned_preview.dtypes.astype(str).values
@@ -507,6 +552,21 @@ if uploaded_file:
             # --------------------------------------------------
 
             show_visualizations(cleaned_full)
+
+            # --------------------------------------------------
+            # DASHBOARD REPORT
+            # --------------------------------------------------
+
+            st.write("## Dashboard Report")
+
+            download_html_report(
+            raw_df,
+            cleaned_full,
+            uploaded_file.name
+        )
+
+            # optional preview
+            st.components.v1.html(report_html, height=600, scrolling=True)
 
         except Exception:
             # silently skip if cleaning fails
