@@ -1,584 +1,157 @@
-import streamlit as st
-import polars as pl
 import pandas as pd
-from file_loader import load_file
-from cleaned_dataset_preview import get_cleaned_preview, clean_dataset_pandas
-from descriptive_stats import numerical_descriptive_stats 
-from data_visualization import show_visualizations
-from html_report import download_html_report
-import os
-from pathlib import Path
-from html_report import download_html_report
-
-
-# --------------------------------------------------
-# PAGE CONFIGURATION
-# --------------------------------------------------
+import streamlit as st
 
 st.set_page_config(
-    page_title="📊 Retail Analyzer",
+    page_title="Retail Analyzer",
     page_icon="📊",
     layout="wide"
 )
 
+from file_loader import load_file
+from cleaned_dataset_preview import clean_dataset_pandas
+from data_visualization import show_visualizations
+from html_report import download_html_report
+from dashboard import show_dashboard
 
-# --------------------------------------------------
-# CUSTOM CSS
-# --------------------------------------------------
 
-st.markdown(
-    """
-    <style>
+def dataset_label(file_name):
+    return (
+        file_name.rsplit(".", 1)[0]
+        .replace("_", " ")
+        .replace("-", " ")
+        .title()
+    )
 
-    /* Main title */
-    h1 {
-        font-size: 32px !important;
-        font-weight: 700 !important;
-    }
 
-    /* Section headings */
-    h2 {
-        font-size: 24px !important;
-        font-weight: 700 !important;
-    }
+def _as_pandas(df):
+    if isinstance(df, pd.DataFrame):
+        return df.copy()
 
-    /* Sub-section headings */
-    h3 {
-        font-size: 24px !important;
-        font-weight: 700 !important;
-        margin-top: 1rem;
-    }
+    try:
+        return df.to_pandas()
+    except Exception:
+        pass
 
-    /* Make ONLY metric headings bold */
-    div[data-testid="stMetric"] label {
-        font-size: 16px !important;
-        font-weight: 700 !important;
-    }
+    return pd.DataFrame(df)
 
-    div[data-testid="stMetric"] label p {
-        font-size: 16px !important;
-        font-weight: 700 !important;
-    }
 
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+def is_missing_value(value):
+    if value is None:
+        return True
 
-# --------------------------------------------------
-# TITLE
-# --------------------------------------------------
+    if isinstance(value, (dict, list, tuple, set)):
+        return False
+
+    try:
+        result = pd.isna(value)
+        if not hasattr(result, "__len__") and bool(result):
+            return True
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, str):
+        return value.strip().lower() in {
+            "", "nan", "none", "null", "n/a", "na", "<na>"
+        }
+
+    return False
+
+
+def count_missing_values(df):
+    df = _as_pandas(df)
+    return sum(
+        is_missing_value(value)
+        for column in df.columns
+        for value in df[column]
+    )
+
+
+def highlight_missing_cells(df):
+    def highlight(value):
+        if is_missing_value(value):
+            return "background-color: #FCE4E4; color: #9B1C1C;"
+        return ""
+
+    return df.style.map(highlight)
+
+
+def show_dataset_analysis_tab(raw_df, cleaned_df, missing_count, file_name):
+    st.write("## Dataset Information")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Rows", f"{len(raw_df):,}")
+    col2.metric("Columns", f"{len(raw_df.columns):,}")
+    col3.metric("Missing Values", f"{missing_count:,}")
+
+    file_size = getattr(st.session_state.get("uploaded_file"), "size", None)
+    file_size_text = f"{file_size / 1024:.2f} KB" if file_size is not None else "N/A"
+    col4.metric("File Size", file_size_text)
+
+    st.write("## Dataset Preview")
+    st.dataframe(highlight_missing_cells(raw_df), use_container_width=True, height=500)
+
+    st.write("## Column Information")
+    column_info = pd.DataFrame({
+        "Column Name": raw_df.columns,
+        "Data Type": [str(raw_df[col].dtype) for col in raw_df.columns],
+        "Missing Values": [int(raw_df[col].isna().sum()) for col in raw_df.columns],
+        "Unique Values": [int(raw_df[col].nunique(dropna=True)) for col in raw_df.columns],
+    })
+    st.dataframe(column_info, use_container_width=True)
+
+    st.write("## Cleaned Dataset Preview")
+    st.dataframe(cleaned_df, use_container_width=True, height=500)
+
+    st.write("## Descriptive Statistics")
+    numeric_df = cleaned_df.select_dtypes(include=["number"])
+    if not numeric_df.empty:
+        st.dataframe(numeric_df.describe().T, use_container_width=True)
+    else:
+        st.info("No numeric columns available.")
+
+    st.write("## Data Visualizations")
+    show_visualizations(cleaned_df)
+
+    st.write("## Generate Report")
+    download_html_report(raw_df, cleaned_df, file_name, missing_count)
+
+
+def show_dashboard_tab(cleaned_df, file_name):
+    clean_name = file_name.rsplit(".", 1)[0]
+    clean_name = clean_name.replace(" (1)", "").replace(" (2)", "").replace(" (3)", "")
+    show_dashboard(cleaned_df, clean_name)
+
 
 st.title("📊 Retail Analyzer")
-
-st.write(
-    "Intelligent Retail Data Analysis & Decision Support System"
-)
-
-
-# --------------------------------------------------
-# FILE SIZE FORMATTER
-# --------------------------------------------------
-
-def sizeof_fmt(n):
-
-    if n is None:
-        return "N/A"
-
-    n = float(n)
-
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-
-        if n < 1024.0:
-            return f"{n:.2f} {unit}"
-
-        n /= 1024.0
-
-    return f"{n:.2f} PB"
-
-
-# --------------------------------------------------
-# FILE UPLOADER
-# --------------------------------------------------
+st.caption("Intelligent Retail Data Analysis & Decision Support System")
 
 uploaded_file = st.file_uploader(
     "Upload your dataset",
-    type=["csv", "xlsx", "xls", "json"]
+    type=["csv", "xlsx", "xls", "json"],
+    key="uploaded_file"
 )
 
-
-# --------------------------------------------------
-# PROCESS UPLOADED FILE
-# --------------------------------------------------
-
-if uploaded_file:
-
-    try:
-
-        # Load file
-        try:
-            df = load_file(uploaded_file)
-        except Exception:
-            # silent fallbacks: try pandas (all columns as strings), then relaxed polars
-            try:
-                uploaded_file.seek(0)
-                name = getattr(uploaded_file, "name", "") or ""
-                if name.lower().endswith((".csv", ".txt")):
-                    pd_df = pd.read_csv(uploaded_file, dtype=str, low_memory=False)
-                elif name.lower().endswith((".xls", ".xlsx")):
-                    uploaded_file.seek(0)
-                    pd_df = pd.read_excel(uploaded_file, dtype=str)
-                elif name.lower().endswith(".json"):
-                    uploaded_file.seek(0)
-                    pd_df = pd.read_json(uploaded_file)
-                else:
-                    uploaded_file.seek(0)
-                    pd_df = pd.read_csv(uploaded_file, dtype=str, low_memory=False)
-
-                df = pl.DataFrame(pd_df)
-            except Exception:
-                try:
-                    uploaded_file.seek(0)
-                    df = pl.read_csv(
-                        uploaded_file,
-                        infer_schema_length=10000,
-                        ignore_errors=True
-                    )
-                except Exception as final_exc:
-                    st.error("Failed to load file.")
-                    raise final_exc
-
-
-        # Ensure Polars DataFrame
-        if not isinstance(df, pl.DataFrame):
-            df = pl.DataFrame(df)
-
-        st.success("File loaded successfully!")
-
-
-        # --------------------------------------------------
-        # DATASET INFORMATION
-        # --------------------------------------------------
-
-        st.write("## Dataset Information")
-
-        file_name = getattr(
-            uploaded_file,
-            "name",
-            "unknown"
-        )
-
-
-        # --------------------------------------------------
-        # GET FILE SIZE
-        # --------------------------------------------------
-
-        file_size_bytes = None
-
-        try:
-
-            file_size_bytes = getattr(
-                uploaded_file,
-                "size",
-                None
-            )
-
-        except Exception:
-
-            file_size_bytes = None
-
-
-        if file_size_bytes is None:
-
-            try:
-
-                buf = getattr(
-                    uploaded_file,
-                    "getbuffer",
-                    None
-                )
-
-                if callable(buf):
-
-                    file_size_bytes = (
-                        uploaded_file
-                        .getbuffer()
-                        .nbytes
-                    )
-
-                else:
-
-                    file_size_bytes = getattr(
-                        uploaded_file,
-                        "_file",
-                        None
-                    )
-
-                    if file_size_bytes is not None:
-
-                        file_size_bytes = (
-                            file_size_bytes
-                            .getbuffer()
-                            .nbytes
-                        )
-
-            except Exception:
-
-                file_size_bytes = None
-
-
-        # --------------------------------------------------
-        # MEMORY USAGE
-        # --------------------------------------------------
-
-        memory_usage_bytes = None
-
-        try:
-
-            memory_usage_bytes = (
-                df.estimated_size()
-            )
-
-        except Exception:
-
-            try:
-
-                if df.height * df.width <= 200_000:
-
-                    memory_usage_bytes = (
-                        df
-                        .to_pandas()
-                        .memory_usage(deep=True)
-                        .sum()
-                    )
-
-            except Exception:
-
-                memory_usage_bytes = None
-
-
-        # --------------------------------------------------
-        # FILE INFORMATION
-        # --------------------------------------------------
-
-        col_a, col_b, col_c = st.columns(3)
-
-        col_a.markdown(
-            f"**File name:** {file_name}"
-        )
-
-        col_b.markdown(
-            f"**File size:** "
-            f"{sizeof_fmt(file_size_bytes)}"
-        )
-
-        col_c.markdown(
-            f"**Memory usage (estimated):** "
-            f"{sizeof_fmt(memory_usage_bytes)}"
-        )
-
-
-        # --------------------------------------------------
-        # DATASET OVERVIEW
-        # --------------------------------------------------
-
-        st.write("## Dataset Overview")
-
-        rows = df.height
-        cols = df.width
-
-
-        # --------------------------------------------------
-        # NULL VALUES
-        # --------------------------------------------------
-
-        null_counts_raw = df.null_count()
-
-        try:
-
-            col_nulls = null_counts_raw.to_list()
-
-        except Exception:
-
-            col_nulls = [
-                int(
-                    df
-                    .select(
-                        pl.col(c)
-                        .is_null()
-                        .sum()
-                    )
-                    .to_series()[0]
-                )
-                for c in df.columns
-            ]
-
-
-        missing = sum(
-            int(n)
-            for n in col_nulls
-        )
-
-
-        # --------------------------------------------------
-        # DUPLICATES
-        # --------------------------------------------------
-
-        duplicates = (
-            rows -
-            df.unique().height
-        )
-
-
-        # --------------------------------------------------
-        # KPI CARDS
-        # --------------------------------------------------
-
-        k1, k2, k3, k4 = st.columns(4)
-
-        k1.markdown(
-            f'''
-            <div>
-                <strong style="font-size:16px;">Total rows</strong><br>
-                <span style="font-size:22px; font-weight:400;">{rows:,}</span>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-
-        k2.markdown(
-            f'''
-            <div>
-                <strong style="font-size:16px;">Total columns</strong><br>
-                <span style="font-size:22px; font-weight:400;">{cols:,}</span>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-
-        k3.markdown(
-            f'''
-            <div>
-                <strong style="font-size:16px;">Missing values</strong><br>
-                <span style="font-size:22px; font-weight:400;">{missing:,}</span>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-
-        k4.markdown(
-            f'''
-            <div>
-                <strong style="font-size:16px;">Duplicate rows</strong><br>
-                <span style="font-size:22px; font-weight:400;">{duplicates:,}</span>
-            </div>
-            ''',
-            unsafe_allow_html=True
-        )
-        # --------------------------------------------------
-        # COMPLETE DATASET
-        # --------------------------------------------------
-
-        st.write("### Complete Dataset")
-
-        try:
-            raw_df = df.to_pandas()
-
-            # allow styling for very large dataframe
-            pd.set_option("styler.render.max_elements", max(1, raw_df.shape[0] * raw_df.shape[1]))
-
-            def highlight_missing_cells(df):
-                def style_cell(value):
-                    # missing values
-                    if pd.isna(value):
-                        return "background-color: #f8d7da; color: #842029; font-weight: 600;"
-
-                    # blank strings / spaces only
-                    if isinstance(value, str):
-                        if value.strip() == "":
-                            return "background-color: #f8d7da; color: #842029; font-weight: 600;"
-
-                    return ""
-
-                return df.style.map(style_cell)
-
-            st.dataframe(highlight_missing_cells(raw_df), use_container_width=True, height=800)
-
-        except Exception:
-            st.table(df.to_dicts())
-
-        # ==================================================
-        # MISSING VALUE DETAILS
-        # ==================================================
-
-        st.write("## Missing Value Details")
-
-        missing_details = []
-
-        for index, row in raw_df.iterrows():
-
-            for column in raw_df.columns:
-
-                value = row[column]
-
-                if pd.isna(value) or (
-                    isinstance(value, str) and value.strip() == ""
-                ):
-
-                    column_name = str(column).replace("_", " ").strip()
-
-                    missing_details.append({
-                        "Row": index ,
-                        "Column": column,
-                        "Missing Information": column_name,
-                        "Actual Value": value
-                    })
-
-        missing_df = pd.DataFrame(missing_details)
-
-        if not missing_df.empty:
-
-            st.dataframe(
-                missing_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        else:
-
-            st.success("No missing values found.")
-                    
-        # --------------------------------------------------
-        # CLEANED DATASET PREVIEW + COLUMN INFO
-        # --------------------------------------------------
-        try:
-            # create full cleaned dataset (use this for stats) and a preview for display
-            cleaned_full = clean_dataset_pandas(raw_df)
-            cleaned_preview = cleaned_full.head(200)
-
-            st.write("### Column information")
-            cols_info = pd.DataFrame({
-                "column": cleaned_preview.columns,
-                "dtype": cleaned_preview.dtypes.astype(str).values
-            })
-            st.dataframe(cols_info, use_container_width=True)
-
-            st.write("### Cleaned Dataset Preview")
-            st.dataframe(cleaned_preview, use_container_width=True, height=400)
-
-            # --------------------------------------------------
-            # DESCRIPTIVE STATISTICS
-            # --------------------------------------------------
-
-            st.write("### Descriptive Statistics")
-
-            # Use the cleaned dataset for statistics
-            numeric_data = cleaned_full.select_dtypes(include="number")
-
-            if not numeric_data.empty:
-                st.write("#### Numerical Descriptive Statistics")
-
-                descriptive_stats = numeric_data.describe().T
-
-                # Add useful statistics
-                descriptive_stats["median"] = numeric_data.median()
-                descriptive_stats["missing"] = numeric_data.isna().sum()
-                descriptive_stats["missing_%"] = (
-                    numeric_data.isna().mean() * 100
-                ).round(2)
-
-                # Arrange columns in a readable order
-                descriptive_stats = descriptive_stats[
-                    [
-                        "count",
-                        "mean",
-                        "median",
-                        "std",
-                        "min",
-                        "25%",
-                        "50%",
-                        "75%",
-                        "max",
-                        "missing",
-                        "missing_%"
-                    ]
-                ]
-
-                st.dataframe(
-                    descriptive_stats.round(2),
-                    use_container_width=True
-                )
-            # Categorical column statistics
-            categorical_data = cleaned_full.select_dtypes(
-                exclude="number"
-            )
-
-            if not categorical_data.empty:
-                #st.write("#### Descriptive Statistics")
-
-                categorical_stats = pd.DataFrame({
-                    "column": categorical_data.columns,
-                    "count": [
-                        categorical_data[col].count()
-                        for col in categorical_data.columns
-                    ],
-                    "unique": [
-                        categorical_data[col].nunique(dropna=True)
-                        for col in categorical_data.columns
-                    ],
-                    "missing": [
-                        categorical_data[col].isna().sum()
-                        for col in categorical_data.columns
-                    ],
-                    "most_frequent": [
-                        categorical_data[col].mode().iloc[0]
-                        if not categorical_data[col].mode().empty
-                        else "N/A"
-                        for col in categorical_data.columns
-                    ]
-                })
-
-                categorical_stats["missing_%"] = (
-                    categorical_stats["missing"] / len(cleaned_full) * 100
-                ).round(2)
-
-                st.dataframe(
-                    categorical_stats,
-                    use_container_width=True
-                )
-
-            # --------------------------------------------------
-            # DATA VISUALIZATION
-            # --------------------------------------------------
-
-            show_visualizations(cleaned_full)
-
-            # --------------------------------------------------
-            # DASHBOARD REPORT
-            # --------------------------------------------------
-
-            st.write("## Dashboard Report")
-
-            download_html_report(
-            raw_df,
-            cleaned_full,
-            uploaded_file.name
-        )
-
-            # optional preview
-            st.components.v1.html(report_html, height=600, scrolling=True)
-
-        except Exception:
-            # silently skip if cleaning fails
-            pass
-
-
-    # --------------------------------------------------
-    # ERROR HANDLING
-    # --------------------------------------------------
-
-    except Exception as error:
-
-        st.error(
-            str(error)
-        )
+if uploaded_file is None:
+    st.info("Please upload a file to begin analysis.")
+    st.stop()
+
+try:
+    loaded_df = load_file(uploaded_file)
+    raw_df = _as_pandas(loaded_df)
+    cleaned_df = _as_pandas(clean_dataset_pandas(raw_df))
+    missing_count = count_missing_values(raw_df)
+
+    st.session_state["raw_df"] = raw_df
+    st.session_state["cleaned_df"] = cleaned_df
+    st.session_state["dataset_name"] = uploaded_file.name
+    st.session_state["missing"] = missing_count
+
+    tab1, tab2 = st.tabs(["Dataset Analysis", "Dashboard"])
+
+    with tab1:
+        show_dataset_analysis_tab(raw_df, cleaned_df, missing_count, uploaded_file.name)
+
+    with tab2:
+        show_dashboard_tab(cleaned_df, uploaded_file.name)
+
+except Exception as e:
+    st.error(f"Error while processing dataset: {e}")

@@ -1,35 +1,57 @@
 import polars as pl
 from pathlib import Path
-import io
 
 
 def load_file(file):
     extension = Path(file.name).suffix.lower()
 
+    # --------------------------------------------------
+    # CSV
+    # --------------------------------------------------
     if extension == ".csv":
-        # read robustly, avoid aggressive type inference, then cast to Utf8
-        # pass the file-like object (Streamlit UploadedFile)
+
+        # Read everything as text first.
+        # This preserves values such as:
+        # 0
+        # 0.00
+        # 100.50
+        #
+        # No zero value will be converted to missing.
         df = pl.read_csv(
             file,
+            infer_schema=False,
             try_parse_dates=False,
-            ignore_errors=True,
-            infer_schema_length=5000
+            ignore_errors=False
         )
-        df = df.with_columns([pl.col(c).cast(pl.Utf8) for c in df.columns])
+
         return df
 
+    # --------------------------------------------------
+    # EXCEL
+    # --------------------------------------------------
     if extension in [".xlsx", ".xls"]:
-        # polars supports reading excel; pass file-like object
+
         df = pl.read_excel(file)
-        # ensure string columns to avoid mixed-type issues
-        df = df.with_columns([pl.col(c).cast(pl.Utf8) for c in df.columns])
+
         return df
 
+    # --------------------------------------------------
+    # JSON
+    # --------------------------------------------------
     if extension == ".json":
-        # try ndjson first, fallback to regular json
+
         try:
             return pl.read_ndjson(file)
+
         except Exception:
+
+            file.seek(0)
+
             return pl.read_json(file)
 
-    raise ValueError("Unsupported file format. Use CSV, Excel, or JSON.")
+    # --------------------------------------------------
+    # INVALID FILE
+    # --------------------------------------------------
+    raise ValueError(
+        "Unsupported file format. Use CSV, Excel, or JSON."
+    )

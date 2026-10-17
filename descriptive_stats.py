@@ -1,39 +1,37 @@
-import pandas as pd
-import polars as pl
-from typing import Union
+import streamlit as st
 
 
-def _to_pandas(df: Union[pd.DataFrame, pl.DataFrame]) -> pd.DataFrame:
-    if isinstance(df, pl.DataFrame):
-        return df.to_pandas()
-    return df.copy()
+def show_descriptive_statistics(df):
+    st.subheader("📊 Descriptive Statistics")
 
+    # Numeric columns
+    numeric_df = df.select_dtypes(include="number")
 
-def numerical_descriptive_stats(df: Union[pd.DataFrame, pl.DataFrame], round_n: int = 4) -> pd.DataFrame:
-    """
-    Return descriptive statistics for numerical columns only.
-    Columns returned: count, mean, std, min, 25%, 50%, max
-    """
-    pdf = _to_pandas(df)
-    num = pdf.select_dtypes(include="number")
-    if num.shape[1] == 0:
-        return pd.DataFrame(columns=["count", "mean", "std", "min", "25%", "50%", "max"])
+    if not numeric_df.empty:
+        st.write("### Numeric Columns")
+        st.dataframe(numeric_df.describe())
 
-    desc = num.describe(percentiles=[0.25, 0.5]).transpose()
-    # ensure required columns exist
-    for c in ("count", "mean", "std", "min", "25%", "50%", "max"):
-        if c not in desc.columns:
-            desc[c] = pd.NA
+    else:
+        st.info("No numeric columns found.")
 
-    result = desc[["count", "mean", "std", "min", "25%", "50%", "max"]].copy()
-    # make count integer if possible
-    try:
-        result["count"] = result["count"].astype("Int64")
-    except Exception:
-        pass
+    # Categorical columns
+    categorical_df = df.select_dtypes(exclude="number")
 
-    # round floats
-    float_cols = result.select_dtypes(include="number").columns.difference(["count"])
-    result[float_cols] = result[float_cols].round(round_n)
+    if not categorical_df.empty:
+        st.write("### Categorical Columns")
 
-    return result.reset_index().rename(columns={"index": "column"})
+        stats = categorical_df.describe().T
+        st.dataframe(stats)
+
+    # Missing values
+    st.write("### Missing Values")
+
+    missing = df.isnull().sum()
+    missing_percentage = (missing / len(df)) * 100
+
+    missing_stats = {
+        "Missing Values": missing,
+        "Missing %": missing_percentage.round(2)
+    }
+
+    st.dataframe(missing_stats)
