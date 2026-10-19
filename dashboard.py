@@ -1,395 +1,274 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import plotly.express as px
-import polars as pl
 
 
 def _as_pandas(df):
     if isinstance(df, pd.DataFrame):
         return df.copy()
-    if isinstance(df, pl.DataFrame):
-        return df.to_pandas()
     return pd.DataFrame(df)
 
 
-def make_unique_columns(df):
-    """Make all column names unique, including repeated empty names."""
+def make_safe_columns(df):
     df = df.copy()
-    new_columns = []
-    seen = set()
+    seen = {}
+    new_cols = []
 
-    for column in df.columns:
-        name = str(column).strip()
+    for col in df.columns:
+        name = str(col).strip() or "Unnamed"
+        base = name
+        idx = 1
+        while name in seen:
+            name = f"{base}_{idx}"
+            idx += 1
+        seen[name] = True
+        new_cols.append(name)
 
-        if not name:
-            name = "Unnamed"
-
-        candidate = name
-        counter = 1
-
-        while candidate in seen:
-            candidate = f"{name}_{counter}"
-            counter += 1
-
-        new_columns.append(candidate)
-        seen.add(candidate)
-
-    df.columns = new_columns
+    df.columns = new_cols
     return df
 
 
-def show_dashboard(dataframe, dataset_name):
-    st.title(f"{dataset_name} Dashboard")
-    st.caption(f"Dataset: {dataset_name}")
+def clean_dataset_name(name):
+    if not name:
+        return "Dataset"
+    clean_name = name.rsplit(".", 1)[0] if "." in name else name
+    clean_name = clean_name.replace(" (1)", "").replace(" (2)", "").replace(" (3)", "")
+    return clean_name
 
-    if dataframe is None or dataframe.empty:
-        st.warning(
-            "No dataset available. Return to the preview page and upload a file."
-        )
-        return
 
-    # Fix duplicate column names before using Plotly or pandas.
-    dataframe = make_unique_columns(dataframe)
+def detect_product_column(df):
+    keywords = [
+        "product", "item", "sku", "productname", "product_name",
+        "itemname", "item_name", "title", "name"
+    ]
 
-    # Identify columns automatically.
-    columns = list(dataframe.columns)
-    numeric_cols = dataframe.select_dtypes(include="number").columns.tolist()
-
-    def find_column(keywords, excluded=None):
-        excluded = excluded or []
-
-        for col in columns:
-            name = str(col).lower().replace("_", " ")
-
-            if col not in excluded and any(
-                word in name for word in keywords
-            ):
+    for col in df.columns:
+        col_lower = str(col).strip().lower().replace(" ", "")
+        for kw in keywords:
+            if col_lower == kw or kw in col_lower:
                 return col
 
-        return None
+    for col in df.columns:
+        if df[col].dtype == "object" and df[col].nunique(dropna=True) <= 200:
+            return col
 
-    product_col = find_column([
-        "product name", "product", "item description",
-        "item name", "sku"
-    ])
+    return None
 
-    category_col = find_column([
-        "category", "item type", "product type"
-    ])
 
-    sales_col = find_column([
-        "total sales", "sales", "revenue",
-        "retail sales", "amount"
-    ])
+def detect_numeric_metric(df):
+    metric_candidates = [
+        "sales", "revenue", "amount", "price", "total", "quantity",
+        "qty", "units", "count"
+    ]
 
-    quantity_col = find_column([
-        "quantity", "qty", "units sold"
-    ])
+    for col in df.columns:
+        col_lower = str(col).strip().lower().replace(" ", "")
+        for kw in metric_candidates:
+            if kw in col_lower and pd.api.types.is_numeric_dtype(df[col]):
+                return col
 
-    date_col = find_column(["date", "month", "year"])
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            return col
 
-    if sales_col not in numeric_cols if sales_col else True:
-        sales_col = None
+    return None
 
-    if quantity_col not in numeric_cols if quantity_col else True:
-        quantity_col = None
 
-    # Detect numeric columns if names were not recognized.
-    if sales_col is None and numeric_cols:
-        sales_col = numeric_cols[0]
+def detect_category_column(df):
+    for col in df.columns:
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+            unique_count = df[col].dropna().nunique()
+            if 1 < unique_count <= 20:
+                return col
+    return None
 
-    if quantity_col is None:
-        quantity_col = next(
-            (col for col in numeric_cols if col != sales_col),
-            None
+
+def detect_date_column(df):
+    for col in df.columns:
+        try:
+            parsed = pd.to_datetime(df[col], errors="coerce")
+            ratio = parsed.notna().mean()
+            if ratio > 0.7:
+                return col
+        except Exception:
+            pass
+    return None
+
+
+def get_filter_columns(df):
+    candidate_cols = []
+
+    for col in df.columns:
+        if col.lower() in {"id", "index", "rowid", "customerid", "productid"}:
+            continue
+
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+            unique_count = df[col].dropna().nunique()
+            if 2 <= unique_count <= 50:
+                candidate_cols.append(col)
+        elif pd.api.types.is_datetime64_any_dtype(df[col]):
+            candidate_cols.append(col)
+
+    if len(candidate_cols) >= 2:
+        return candidate_cols[:2]
+
+    fallback = []
+    for col in df.columns:
+        if col.lower() in {"id", "index", "rowid", "customerid", "productid"}:
+            continue
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            fallback.append(col)
+        if len(fallback) == 2:
+            break
+
+    return fallback[:2]
+
+
+def get_bar_group_columns(df):
+    cols = []
+    for col in df.columns:
+        if col.lower() in {"id", "index", "rowid", "customerid", "productid"}:
+            continue
+
+        if pd.api.types.is_object_dtype(df[col]) or pd.api.types.is_categorical_dtype(df[col]):
+            cols.append(col)
+        elif not pd.api.types.is_numeric_dtype(df[col]):
+            cols.append(col)
+
+    return cols[:10]
+
+
+def get_numeric_metric_columns(df):
+    excluded = {"id", "index", "rowid", "customerid", "productid", "customer_id", "orderid"}
+    cols = []
+
+    for col in df.columns:
+        name = str(col).strip().lower()
+        if name in excluded:
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            cols.append(col)
+
+    return cols
+
+
+def show_dashboard(df, dataset_name):
+    if df is None or df.empty:
+        st.warning("No dataset available for the dashboard.")
+        return
+
+    df = _as_pandas(df)
+    df = make_safe_columns(df)
+    df = df.copy()
+
+    clean_name = clean_dataset_name(dataset_name)
+    st.title(f"{clean_name} Dashboard")
+
+    st.markdown("### KPI Overview")
+
+    product_col = detect_product_column(df)
+    metric_col = detect_numeric_metric(df)
+    category_col = detect_category_column(df)
+    date_col = detect_date_column(df)
+
+    filtered_df = df.copy()
+
+    total_records = len(filtered_df)
+    unique_records = filtered_df[product_col].nunique(dropna=True) if product_col else total_records
+
+    c1, c2 = st.columns(2)
+    c1.metric("Total Records", f"{total_records:,}")
+    c2.metric("Unique Records", f"{unique_records:,}")
+
+    filter_columns = get_filter_columns(df)
+    if filter_columns:
+        st.subheader("Dashboard Filters")
+        cols = st.columns(min(len(filter_columns), 2))
+        selected_values = {}
+
+        for i, col in enumerate(filter_columns):
+            options = sorted(df[col].dropna().astype(str).unique().tolist())
+            selected = cols[i % 2].multiselect(
+                f"{col}",
+                options=options,
+                default=[],
+                key=f"dashboard_filter_{col}"
+            )
+            selected_values[col] = selected
+
+        for col, vals in selected_values.items():
+            if vals:
+                filtered_df = filtered_df[filtered_df[col].astype(str).isin(vals)]
+
+        total_records = len(filtered_df)
+        unique_records = filtered_df[product_col].nunique(dropna=True) if product_col else total_records
+
+        c1, c2 = st.columns(2)
+        c1.metric("Total Records", f"{total_records:,}")
+        c2.metric("Unique Records", f"{unique_records:,}")
+
+        bar_group_columns = get_bar_group_columns(filtered_df)
+        if bar_group_columns:
+            selected_bar_col = cols[0].selectbox(
+                "Bar Chart By",
+                options=bar_group_columns,
+                index=0,
+                key="bar_chart_group"
+            )
+        else:
+            selected_bar_col = None
+    else:
+        st.info("No filter options available for this dataset.")
+        selected_bar_col = None
+
+    charts = []
+
+    if selected_bar_col is None:
+        fallback_cols = []
+        for col in filtered_df.columns:
+            if col.lower() in {"id", "index", "rowid", "customerid", "productid"}:
+                continue
+            if not pd.api.types.is_numeric_dtype(filtered_df[col]):
+                fallback_cols.append(col)
+        selected_bar_col = fallback_cols[0] if fallback_cols else None
+
+    if selected_bar_col is not None:
+        bar_df = filtered_df[[selected_bar_col]].copy()
+        bar_df[selected_bar_col] = bar_df[selected_bar_col].fillna("Unknown")
+        bar_df.columns = ["Category"]
+
+        bar_df = (
+            bar_df.groupby("Category", dropna=False)
+            .size()
+            .reset_index(name="Count")
+            .sort_values("Count", ascending=False)
+            .head(10)
         )
 
-    if product_col is None:
-        product_col = category_col
+        if not bar_df.empty:
+            charts.append(("Bar Chart", "Category Distribution", bar_df, "Category", "Count"))
 
-    # Parse a usable date column.
-    parsed_date_col = None
+            pie_df = bar_df.head(8).copy()
+            charts.append(("Pie Chart", "Category Share", pie_df, "Category", "Count"))
 
-    if date_col:
-        parsed = pd.to_datetime(dataframe[date_col], errors="coerce")
+    if len(charts) == 0:
+        st.info("No meaningful chart could be generated for this dataset.")
+        return
 
-        if parsed.notna().sum() > 0:
-            dataframe["_Dashboard_Date"] = parsed
-            parsed_date_col = "_Dashboard_Date"
+    display_charts = charts[:2]
 
-    st.subheader("Filters")
+    st.markdown("### Charts")
 
-    filter_cols = st.columns(3)
-    filtered = dataframe.copy()
+    for chart_type, chart_title, chart_df, x_col, y_col in display_charts:
+        st.subheader(chart_title)
 
-    # Date/year filter.
-    if parsed_date_col:
-        valid_dates = filtered[parsed_date_col].dropna()
+        if chart_type == "Bar Chart":
+            if x_col in chart_df.columns and y_col in chart_df.columns:
+                st.bar_chart(chart_df, x=x_col, y=y_col, use_container_width=True)
 
-        if not valid_dates.empty:
-            years = sorted(valid_dates.dt.year.unique().tolist())
-
-            with filter_cols[0]:
-                selected_years = st.multiselect(
-                    "Year",
-                    years,
-                    default=years,
-                    key="dashboard_years"
+        elif chart_type == "Pie Chart":
+            if x_col in chart_df.columns and y_col in chart_df.columns:
+                st.plotly_chart(
+                    px.pie(chart_df, names=x_col, values=y_col, title=chart_title),
+                    use_container_width=True
                 )
-
-            filtered = filtered[
-                filtered[parsed_date_col].isna()
-                | filtered[parsed_date_col].dt.year.isin(selected_years)
-            ]
-
-    # Category filter.
-    if category_col:
-        category_values = sorted(
-            filtered[category_col]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-
-        with filter_cols[1]:
-            selected_categories = st.multiselect(
-                "Category",
-                category_values,
-                default=category_values,
-                key="dashboard_categories"
-            )
-
-        filtered = filtered[
-            filtered[category_col].isna()
-            | filtered[category_col].astype(str).isin(
-                selected_categories
-            )
-        ]
-
-    # Product filter.
-    if product_col and product_col != category_col:
-        product_values = sorted(
-            filtered[product_col]
-            .dropna()
-            .astype(str)
-            .unique()
-            .tolist()
-        )
-
-        with filter_cols[2]:
-            selected_products = st.multiselect(
-                "Product",
-                product_values,
-                default=product_values,
-                key="dashboard_products"
-            )
-
-        filtered = filtered[
-            filtered[product_col].isna()
-            | filtered[product_col].astype(str).isin(
-                selected_products
-            )
-        ]
-
-    st.divider()
-
-    # Four KPI cards.
-    total_records = len(filtered)
-
-    unique_products = (
-        filtered[product_col].nunique()
-        if product_col else 0
-    )
-
-    total_sales = (
-        pd.to_numeric(
-            filtered[sales_col], errors="coerce"
-        ).sum()
-        if sales_col else 0
-    )
-
-    average_quantity = (
-        pd.to_numeric(
-            filtered[quantity_col], errors="coerce"
-        ).mean()
-        if quantity_col else float("nan")
-    )
-
-    k1, k2, k3, k4 = st.columns(4)
-
-    k1.metric("Total Records", f"{total_records:,}")
-    k2.metric("Unique Products", f"{unique_products:,}")
-    k3.metric("Total Sales", f"{total_sales:,.2f}")
-    k4.metric(
-        "Average Quantity",
-        f"{average_quantity:,.2f}"
-        if pd.notna(average_quantity) else "N/A"
-    )
-
-    st.divider()
-
-    # Chart 1: Sales by product/category.
-    left, right = st.columns(2)
-
-    with left:
-        st.subheader("Sales by Product / Category")
-
-        bar_group = product_col or category_col
-
-        if sales_col and bar_group:
-            bar_data = filtered.copy()
-
-            bar_data[sales_col] = pd.to_numeric(
-                bar_data[sales_col], errors="coerce"
-            )
-
-            bar_data = (
-                bar_data.groupby(
-                    bar_group, dropna=False, as_index=False
-                )[sales_col]
-                .sum()
-                .sort_values(sales_col, ascending=False)
-                .head(15)
-            )
-
-            fig = px.bar(
-                bar_data,
-                x=bar_group,
-                y=sales_col,
-                title="Top 15 by Sales"
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-        else:
-            st.info(
-                "A product/category column and numeric sales column are needed."
-            )
-
-    # Chart 2: Sales trend.
-    with right:
-        st.subheader("Sales Trend")
-
-        if sales_col and parsed_date_col:
-            trend = filtered.copy()
-
-            trend[sales_col] = pd.to_numeric(
-                trend[sales_col], errors="coerce"
-            )
-
-            trend = trend.dropna(subset=[parsed_date_col])
-            trend["Period"] = (
-                trend[parsed_date_col]
-                .dt.to_period("M")
-                .astype(str)
-            )
-
-            trend = (
-                trend.groupby(
-                    "Period", as_index=False
-                )[sales_col]
-                .sum()
-                .sort_values("Period")
-            )
-
-            fig = px.line(
-                trend,
-                x="Period",
-                y=sales_col,
-                markers=True,
-                title="Sales Over Time"
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-        else:
-            st.info(
-                "A usable date and numeric sales column are needed."
-            )
-
-    # Chart 3: Sales share.
-    with left:
-        st.subheader("Sales Share")
-
-        pie_group = category_col or product_col
-
-        if sales_col and pie_group:
-            pie_data = filtered.copy()
-
-            pie_data[sales_col] = pd.to_numeric(
-                pie_data[sales_col], errors="coerce"
-            )
-
-            pie_data = (
-                pie_data.groupby(
-                    pie_group, dropna=False, as_index=False
-                )[sales_col]
-                .sum()
-                .nlargest(10, sales_col)
-            )
-
-            # Exclude non-positive values from the pie chart.
-            pie_data = pie_data[pie_data[sales_col] > 0]
-
-            if not pie_data.empty:
-                fig = px.pie(
-                    pie_data,
-                    names=pie_group,
-                    values=sales_col,
-                    title="Sales Share by Category"
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No positive sales values are available.")
-
-        else:
-            st.info(
-                "A category/product column and numeric sales column are needed."
-            )
-
-    # Chart 4: Sales versus quantity.
-    with right:
-        st.subheader("Sales vs Quantity")
-
-        if sales_col and quantity_col:
-            scatter_data = filtered.copy()
-
-            scatter_data[sales_col] = pd.to_numeric(
-                scatter_data[sales_col], errors="coerce"
-            )
-
-            scatter_data[quantity_col] = pd.to_numeric(
-                scatter_data[quantity_col], errors="coerce"
-            )
-
-            scatter_data = scatter_data.dropna(
-                subset=[sales_col, quantity_col]
-            )
-
-            if not scatter_data.empty:
-                hover_columns = (
-                    [product_col]
-                    if product_col and product_col not in [
-                        sales_col, quantity_col
-                    ]
-                    else None
-                )
-
-                fig = px.scatter(
-                    scatter_data,
-                    x=quantity_col,
-                    y=sales_col,
-                    title="Sales vs Quantity",
-                    hover_data=hover_columns
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No valid sales and quantity values to plot.")
-
-        else:
-            st.info(
-                "Two suitable numeric columns are needed for the scatter plot."
-            )

@@ -1,3 +1,4 @@
+import html
 import pandas as pd
 import streamlit as st
 
@@ -6,6 +7,9 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+pd.set_option("display.max_columns", None)
+pd.set_option("display.max_rows", 200)
 
 from file_loader import load_file
 from cleaned_dataset_preview import clean_dataset_pandas
@@ -66,13 +70,75 @@ def count_missing_values(df):
     )
 
 
-def highlight_missing_cells(df):
-    def highlight(value):
-        if is_missing_value(value):
-            return "background-color: #FCE4E4; color: #9B1C1C;"
-        return ""
+def highlight_missing_cells_html(df, max_rows=200):
+    preview = df.head(max_rows).copy()
+    columns = list(preview.columns)
 
-    return df.style.map(highlight)
+    header = "".join(
+        f"<th style='padding:8px;border:1px solid #e5e7eb;background:#f3f4f6;font-weight:700;'>"
+        f"{html.escape(str(col))}</th>"
+        for col in columns
+    )
+
+    rows = []
+    for _, row in preview.iterrows():
+        cells = []
+        for col in columns:
+            value = row[col]
+            is_missing = is_missing_value(value)
+            bg = "#FCE4E4" if is_missing else "#ffffff"
+            fg = "#9B1C1C" if is_missing else "#111827"
+            text = "" if pd.isna(value) and not isinstance(value, str) else str(value)
+            cells.append(
+                f"<td style='padding:8px;border:1px solid #e5e7eb;background:{bg};color:{fg};'>"
+                f"{html.escape(text)}</td>"
+            )
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = (
+        "<table style='border-collapse:collapse;width:100%;font-size:12px;'>"
+        "<thead><tr>" + header + "</tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody>"
+        "</table>"
+    )
+    return table_html
+
+
+def html_table_with_scroll(df, max_rows=200):
+    preview = df.head(max_rows).copy()
+
+    columns = list(preview.columns)
+    header = "".join(
+        f"<th style='padding:8px;border:1px solid #e5e7eb;background:#f3f4f6;font-weight:700;white-space:nowrap;'>"
+        f"{html.escape(str(col))}</th>"
+        for col in columns
+    )
+
+    rows = []
+    for _, row in preview.iterrows():
+        cells = []
+        for col in columns:
+            value = row[col]
+            is_missing = is_missing_value(value)
+            bg = "#FCE4E4" if is_missing else "#ffffff"
+            fg = "#9B1C1C" if is_missing else "#111827"
+            text = "" if pd.isna(value) and not isinstance(value, str) else str(value)
+
+            cells.append(
+                f"<td style='padding:8px;border:1px solid #e5e7eb;background:{bg};color:{fg};"
+                f"word-wrap:break-word;white-space:normal;vertical-align:top;'>"
+                f"{html.escape(text)}</td>"
+            )
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = (
+        "<table style='border-collapse:collapse;width:100%;table-layout:fixed;font-size:12px;'>"
+        "<thead><tr>" + header + "</tr></thead>"
+        "<tbody>" + "".join(rows) + "</tbody>"
+        "</table>"
+    )
+
+    return table_html
 
 
 def show_dataset_analysis_tab(raw_df, cleaned_df, missing_count, file_name):
@@ -87,19 +153,78 @@ def show_dataset_analysis_tab(raw_df, cleaned_df, missing_count, file_name):
     col4.metric("File Size", file_size_text)
 
     st.write("## Dataset Preview")
-    st.dataframe(highlight_missing_cells(raw_df), use_container_width=True, height=500)
+
+    preview_html = highlight_missing_cells_html(raw_df, max_rows=200)
+
+    st.markdown(
+        f"""
+        <div style="overflow:auto; width:100%; max-height:500px; border:1px solid #e5e7eb; border-radius:8px;">
+            {preview_html}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.write("## Column Information")
+
     column_info = pd.DataFrame({
         "Column Name": raw_df.columns,
         "Data Type": [str(raw_df[col].dtype) for col in raw_df.columns],
         "Missing Values": [int(raw_df[col].isna().sum()) for col in raw_df.columns],
         "Unique Values": [int(raw_df[col].nunique(dropna=True)) for col in raw_df.columns],
     })
-    st.dataframe(column_info, use_container_width=True)
+
+    st.markdown(
+        f"""
+        <div style="overflow:auto; width:100%; max-height:420px; border:1px solid #e5e7eb; border-radius:8px;">
+            {html_table_with_scroll(column_info.head(200))}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.write("## Cleaned Dataset Preview")
-    st.dataframe(cleaned_df, use_container_width=True, height=500)
+
+    clean_preview = cleaned_df.head(200).copy()
+
+    def html_preview_table(df, max_rows=200):
+        preview = df.head(max_rows).copy()
+        columns = list(preview.columns)
+
+        header = "".join(
+            f"<th style='padding:8px;border:1px solid #e5e7eb;background:#f3f4f6;font-weight:700;white-space:nowrap;font-size:12px;'>"
+            f"{html.escape(str(col))}</th>"
+            for col in columns
+        )
+
+        rows = []
+        for _, row in preview.iterrows():
+            cells = []
+            for col in columns:
+                value = row[col]
+                text = "" if pd.isna(value) and not isinstance(value, str) else str(value)
+                cells.append(
+                    f"<td style='padding:8px;border:1px solid #e5e7eb;background:#ffffff;color:#111827;"
+                    f"word-wrap:break-word;white-space:normal;vertical-align:top;font-size:12px;'>"
+                    f"{html.escape(text)}</td>"
+                )
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+
+        return (
+            "<table style='border-collapse:collapse;width:100%;table-layout:fixed;font-size:12px;'>"
+            "<thead><tr>" + header + "</tr></thead>"
+            "<tbody>" + "".join(rows) + "</tbody>"
+            "</table>"
+        )
+
+    st.markdown(
+        f"""
+        <div style="overflow:auto; width:100%; max-height:500px; border:1px solid #e5e7eb; border-radius:8px;">
+            {html_preview_table(clean_preview, max_rows=200)}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     st.write("## Descriptive Statistics")
     numeric_df = cleaned_df.select_dtypes(include=["number"])
