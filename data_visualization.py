@@ -1,4 +1,3 @@
-from duckdb import df
 import streamlit as st
 import pandas as pd
 import polars as pl
