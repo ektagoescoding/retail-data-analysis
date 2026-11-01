@@ -8,6 +8,25 @@ st.set_page_config(
     layout="wide"
 )
 
+st.markdown(
+    """
+    <style>
+    .block-container {
+        padding-top: 1rem !important;
+        padding-bottom: 0 !important;
+        margin-bottom: 0 !important;
+    }
+    div[role="tabpanel"] {
+        padding-bottom: 0 !important;
+    }
+    div[role="tabpanel"] > div:last-child {
+        margin-bottom: 0 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 pd.set_option("display.max_columns", None)
 pd.set_option("display.max_rows", 200)
 
